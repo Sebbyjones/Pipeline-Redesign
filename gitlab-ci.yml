@@ -20,7 +20,7 @@ workflow:
 
 include:
 
-  - component: sfgitlab.opr.statefarm.org/sfcomponents/utilities/jfrog-credentials/template@~latest
+  - component: utilities/jfrog-credentials/template@~latest
 
   - project: 'enterprise-interactions-platform/gitlab-cicd-pipelines'
 
@@ -88,9 +88,9 @@ default:
 
 .pip-conf: &pip-conf
 
-  - python3 -m pip config set global.index-url https://${JFROG_USER}:${JFROG_TEMP_IDENTITY_TOKEN}@packages.ic1.statefarm/artifactory/api/pypi/pypi-virtual/simple
+  - python3 -m pip config set global.index-url https://${JFROG_USER}:${JFROG_TEMP_IDENTITY_TOKEN}@/artifactory/api/pypi/pypi-virtual/simple
 
-  - python3 -m pip config set global.trusted-host packages.ic1.statefarm
+  - python3 -m pip config set global.trusted-host packages
 
  
 
@@ -134,11 +134,11 @@ variables:
 
   TEST_PIPELINE_BRANCH: 'test-main'
 
-  MAVEN_URL: https://packages.ic1.statefarm/artifactory/maven-virtual
+  MAVEN_URL: artifactory/maven-virtual
 
-  STATIC_SCANNER_IMAGE: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/static-scanner:latest
+  STATIC_SCANNER_IMAGE: registry/sfcommunity/static-scanner:latest
 
-  DEPENDENCY_SCANNER_IMAGE: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/dependency-scanner:latest
+  DEPENDENCY_SCANNER_IMAGE: /registry/sfcommunity/dependency-scanner:latest
 
  
 
@@ -146,7 +146,7 @@ variables:
 
   TF_VAR_db_team_name: 'TeamRocket'
 
-  TF_VAR_contact: 'DL-ET-IIH-TeamRocket.DLLLSM@internal.statefarm.com'
+  TF_VAR_contact: 'email'
 
  
 
@@ -192,7 +192,7 @@ python-unit-tests:
 
   stage: install-packages
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommon/python/3.12:alpine3.17
+  image: registry/registry/sfcommon/python/3.12:alpine3.17
 
   extends:
 
@@ -238,7 +238,7 @@ install-python-packages:
 
   stage: install-packages
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommon/python/3.12:alpine3.17
+  image: /registry/sfcommon/python/3.12:alpine3.17
 
   extends:
 
@@ -400,7 +400,7 @@ snyk-python-dependency-scan:
 
     - mkdir -p $REPORTS_PATH
 
-    - pip --trusted-host=packages.ic1.statefarm install -q -i https://$JFROG_USER:$JFROG_TEMP_IDENTITY_TOKEN@packages.ic1.statefarm/artifactory/api/pypi/pypi-virtual/simple -r lambdas/layer/requirements.txt
+    - pip --trusted-host=packages.ic1.sebby install -q -i https://$JFROG_USER:$JFROG_TEMP_IDENTITY_TOKEN@packages.ic1.sebby/artifactory/api/pypi/pypi-virtual/simple -r lambdas/layer/requirements.txt
 
     - pip freeze > /dev/null 2>&1
 
@@ -676,7 +676,7 @@ install-java-packages:
 
   stage: install-packages
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
 
   extends:
 
@@ -776,7 +776,7 @@ install-java-packages:
 
 #   needs: ["install-java-packages"]
 
-#   image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+#   image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
 
 #   script:
 
@@ -804,11 +804,11 @@ install-java-packages:
 
   needs: ["install-java-packages"]
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/docker/alpine:26
 
   services:
 
-    - name: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26-dind
+    - name: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/docker/alpine:26-dind
 
       alias: docker
 
@@ -840,11 +840,11 @@ create-fargate-image:
 
   needs: ["install-java-packages"]
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/docker/alpine:26
 
   services:
 
-    - name: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26-dind
+    - name: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/docker/alpine:26-dind
 
       alias: docker
 
@@ -888,7 +888,7 @@ create-fargate-image:
 
       fi
 
-      export IMG_REGISTRY_PATH="registry.sfgitlab.opr.statefarm.org/enterprise-interactions-platform/personalization-api"
+      export IMG_REGISTRY_PATH="registry.sfgitlab.opr.sebby.org/enterprise-interactions-platform/personalization-api"
 
       export IMG_REGISTRY_PATH_W_TAG=$IMG_REGISTRY_PATH:$TAG_NAME
 
@@ -952,7 +952,7 @@ java-unit-tests:
 
   needs: ["install-java-packages"]
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
 
   extends:
 
@@ -1024,11 +1024,11 @@ integration-tests:
 
   needs: ["install-java-packages"]
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
 
   services:
 
-    - name: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26-dind
+    - name: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/docker/alpine:26-dind
 
       alias: docker
 
@@ -1116,7 +1116,7 @@ mutation-tests:
 
   needs: ["install-java-packages", "java-unit-tests"]
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
 
   extends:
 
@@ -1262,13 +1262,13 @@ mutation-tests:
 
 #         export CI_ENVIRONMENT_NAME="test"
 
-#         export BASE_URL="https://personalization.entint.test.ic1.statefarm"
+#         export BASE_URL="https://personalization.entint.test.ic1.sebby"
 
 #       else
 
 #         export CI_ENVIRONMENT_NAME=$(echo ${CI_COMMIT_BRANCH} | cut -d'-' -f1 | cut -c1-6)
 
-#         export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.statefarm"
+#         export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.sebby"
 
 #       fi
 
@@ -1458,7 +1458,7 @@ chaos-tests:
 
   stage: post-deployment-tests
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
 
   extends:
 
@@ -1524,13 +1524,13 @@ chaos-tests:
 
         export CI_ENVIRONMENT_NAME="test"
 
-        export BASE_URL="https://personalization.entint.test.ic1.statefarm"
+        export BASE_URL="https://personalization.entint.test.ic1.sebby"
 
       else
 
         export CI_ENVIRONMENT_NAME=$(echo ${CI_COMMIT_BRANCH} | cut -d'-' -f1 | cut -c1-6)
 
-        export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.statefarm"
+        export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.sebby"
 
       fi
 
@@ -1570,7 +1570,7 @@ acceptance-tests:
 
   stage: post-deployment-tests
 
-  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+  image: registry.sfgitlab.opr.sebby.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
 
   extends:
 
@@ -1648,17 +1648,17 @@ acceptance-tests:
 
       if [[ "$CI_ENVIRONMENT_NAME" == "test" ]]; then
 
-        export BASE_URL="https://personalization.entint.test.ic1.statefarm"
+        export BASE_URL="https://personalization.entint.test.ic1.sebby"
 
       else
 
-        export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.statefarm"
+        export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.sebby"
 
       fi
 
       echo "[DEBUG] BASE_URL: $BASE_URL"
 
-      if [[ -z "$BASE_URL" || "$BASE_URL" == "https://.personalization.test.ic1.statefarm" ]]; then
+      if [[ -z "$BASE_URL" || "$BASE_URL" == "https://.personalization.test.ic1.sebby" ]]; then
 
         echo "[ERROR] BASE_URL is not set correctly. Failing early."
 
