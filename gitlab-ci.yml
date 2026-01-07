@@ -1,0 +1,1765 @@
+# ---------------------------------------------------------
+
+# --- YML Configuration
+
+# ---------------------------------------------------------
+
+# dont run anything when creating a merge request
+
+workflow:
+
+  rules:
+
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+      when: never
+
+    - when: always
+
+ 
+
+include:
+
+  - component: sfgitlab.opr.statefarm.org/sfcomponents/utilities/jfrog-credentials/template@~latest
+
+  - project: 'enterprise-interactions-platform/gitlab-cicd-pipelines'
+
+    file: 'terraform/template_soda.yml'
+
+    inputs:
+
+      plan_stage: plan
+
+      apply_stage: apply
+
+      destroy_stage: destroy
+
+      unlock_stage: unlock
+
+ 
+
+# ---------------------------------------------------------
+
+# --- Environment Variable Setup
+
+# ---------------------------------------------------------
+
+.set-tf-env: &set-tf-env
+
+  - |
+
+    if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+
+      export TF_VAR_environment="prod"
+
+    else
+
+      export TF_VAR_environment="test"
+
+    fi
+
+    echo "[INFO] TF_VAR_environment=$TF_VAR_environment"
+
+ 
+
+.aws-runner: &aws-runner
+
+  tags: ["shared-aws", "shared-aws-small"]
+
+ 
+
+# tag these for runner groups or else they will be stuck in pending
+
+default:
+
+  tags:
+
+    - shared-aws
+
+  cache:
+
+    key: maven-cache
+
+    paths:
+
+      - .m2/repository
+
+ 
+
+.pip-conf: &pip-conf
+
+  - python3 -m pip config set global.index-url https://${JFROG_USER}:${JFROG_TEMP_IDENTITY_TOKEN}@packages.ic1.statefarm/artifactory/api/pypi/pypi-virtual/simple
+
+  - python3 -m pip config set global.trusted-host packages.ic1.statefarm
+
+ 
+
+stages:
+
+  - unlock
+
+  - install-packages
+
+  - testing
+
+  - deploy-fargate-container
+
+  - code-scans
+
+  - plan-terraform
+
+  - refresh
+
+  - plan
+
+  - apply
+
+  - post-deployment-tests
+
+  - destroy
+
+  - unlock
+
+ 
+
+variables:
+
+  SOLMA_ID: 438424
+
+  SKIP_PLAN: "true"
+
+  SPEEDY_PIPELINE: "false"
+
+  FAIL_ON_HIGH_VULNS: "true"
+
+  TEST_PIPELINE_BRANCH: 'test-main'
+
+  MAVEN_URL: https://packages.ic1.statefarm/artifactory/maven-virtual
+
+  STATIC_SCANNER_IMAGE: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/static-scanner:latest
+
+  DEPENDENCY_SCANNER_IMAGE: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/dependency-scanner:latest
+
+ 
+
+  ##TF VARS
+
+  TF_VAR_db_team_name: 'TeamRocket'
+
+  TF_VAR_contact: 'DL-ET-IIH-TeamRocket.DLLLSM@internal.statefarm.com'
+
+ 
+
+  ##DEV
+
+  SCALR_TOKEN_DEV: $DEV_SCALR_TOKEN
+
+  TF_VAR_partition: $CI_COMMIT_BRANCH
+
+  AWS_ACCESS_KEY_ID: $DEV_PIPELINE_AWS_KEY_ID
+
+  AWS_SECRET_ACCESS_KEY: $DEV_PIPELINE_AWS_KEY_SECRET
+
+ 
+
+  ##TEST
+
+  SCALR_TOKEN_TEST: $TEST_SCALR_TOKEN
+
+  SCALR_ORG_TEST: "sf-entint-test-tenant_personalization"
+
+  SCALR_ENVIRONMENT_TEST: "sf-entint-test-tenant_personalization"
+
+ 
+
+  ##PROD
+
+  SCALR_TOKEN_PROD: $SCALR_TOKEN_PROD
+
+  SCALR_ORG_PROD: "sf-entint-prod-tenant_personalization"
+
+  SCALR_ENVIRONMENT_PROD: "sf-entint-prod-tenant_personalization"
+
+ 
+
+# ---------------------------------------------------------
+
+# --- Lambda Stages
+
+# ---------------------------------------------------------
+
+python-unit-tests:
+
+  stage: install-packages
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommon/python/3.12:alpine3.17
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  before_script:
+
+    - !reference [.jfrog-credentials, script]
+
+  script:
+
+    - *pip-conf
+
+    - pip install -r lambdas/packages/requirements.txt
+
+    - pytest -s $PYTEST_PATH
+
+    - pytest --cov=$MODULE_NAME $PYTEST_PATH --cov-report term --cov-fail-under=80
+
+  rules:
+
+    - if: '$SPEEDY_PIPELINE == "true"'
+
+      when: never
+
+    - when: on_success
+
+  parallel:
+
+    matrix:
+
+      - PYTEST_PATH: 'lambdas/$MODULE_NAME/${MODULE_NAME}_test.py'
+
+        MODULE_NAME: []
+
+ 
+
+# # build the layers based on lambdas/packages/requirements.txt
+
+install-python-packages:
+
+  stage: install-packages
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommon/python/3.12:alpine3.17
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  cache:
+
+    key: python-pip-cache
+
+    paths:
+
+      - lambdas/layer/venv/
+
+      - .pip-cache/
+
+  before_script:
+
+    - !reference [.jfrog-credentials, script]
+
+    - python3 -m ensurepip --upgrade || true
+
+    - python3 -m pip install --upgrade pip
+
+    - *pip-conf
+
+  script:
+
+    - cd lambdas/layer
+
+    - export PIP_CACHE_DIR="$CI_PROJECT_DIR/.pip-cache"
+
+    - mkdir -p "$PIP_CACHE_DIR"
+
+    - python3 -m pip install virtualenv
+
+    - PATH=$PATH:~/.local/bin
+
+    - |
+
+      if [ -d "venv" ]; then
+
+        echo "[INFO] Reusing cached virtual environment"
+
+      else
+
+        echo "[INFO] Creating new virtual environment"
+
+        virtualenv venv
+
+      fi
+
+    - source venv/bin/activate
+
+    - mkdir -p ./opt/python
+
+    # Install dependencies and capture exit code
+
+    - |
+
+      venv/bin/pip install -r requirements.txt -t ./opt/python
+
+      PY_BUILD_RC=$?
+
+      echo "[INFO] pip install exit code: $PY_BUILD_RC"
+
+      echo $PY_BUILD_RC > py_build_exit_code
+
+    # Freeze direct + transitive dependencies for banner parsing
+
+    - venv/bin/pip freeze > py_requirements_full.txt || true
+
+    - python3 -c "import shutil; shutil.make_archive('layer', 'zip', './opt')"
+
+    - mv layer.zip ../../
+
+    - |
+
+        BASE_DIR=$(pwd)
+
+        if [ -x ../../scripts/dependency_coverage.sh ]; then
+
+          ../../scripts/dependency_coverage.sh python "$BASE_DIR" || { echo "[ERROR] python dependency banner failed"; exit 17; }
+
+        else
+
+          sh ../../scripts/dependency_coverage.sh python "$BASE_DIR" || { echo "[ERROR] python dependency banner (sh fallback) failed"; exit 17; }
+
+        fi
+
+  artifacts:
+
+    paths:
+
+      - layer.zip
+
+      - lambdas/layer/python_dependencies_banner.txt
+
+ 
+
+.snyk-scans-template:
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  variables:
+
+    USER: $B2E_APP_ID
+
+    PASS: $B2E_APP_PWD
+
+    SNYK_ORG: $SNYK_ORG
+
+    SNYK_TOKEN: $SNYK_TOKEN
+
+  inherit:
+
+    variables: true
+
+  before_script:
+
+    - unset no_proxy NO_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
+
+    - !reference [.jfrog-credentials, script]
+
+  artifacts:
+
+    paths:
+
+      - reports/
+
+ 
+
+snyk-python-dependency-scan:
+
+  image: $CI_REGISTRY/registry/sfcommon/snyk/python:latest
+
+  stage: code-scans
+
+  extends:
+
+    - .snyk-scans-template
+
+    - .jfrog-credentials
+
+  needs: []
+
+  variables:
+
+    JSON_OUTPUT: reports/snyk/$MODULE_NAME/snyk-dependency-scan.json
+
+    REPORTS_PATH: reports/snyk/$MODULE_NAME
+
+  script:
+
+    - mkdir -p $REPORTS_PATH
+
+    - pip --trusted-host=packages.ic1.statefarm install -q -i https://$JFROG_USER:$JFROG_TEMP_IDENTITY_TOKEN@packages.ic1.statefarm/artifactory/api/pypi/pypi-virtual/simple -r lambdas/layer/requirements.txt
+
+    - pip freeze > /dev/null 2>&1
+
+    # Generate pip freeze output for dependency table display
+
+    - mkdir -p lambdas/layer
+
+    - pip freeze > lambdas/layer/py_requirements_full.txt
+
+    - cd lambdas/$MODULE_NAME
+
+    - snyk monitor --command=python3 --org=$SNYK_ORG --project-name="Personalization - $MODULE_NAME" --project-tags=solma_id=$SOLMA_ID,gitlab_project_id=$CI_PROJECT_ID --project-lifecycle=development --file=../layer/requirements.txt > /dev/null 2>&1 || true
+
+    - cd ../../
+
+    # Run a test scan to produce JSON (previously missing, causing ENOENT)
+
+    - snyk test --org=$SNYK_ORG --project-name="Personalization - $MODULE_NAME" --target-name="$MODULE_NAME" --remote-repo-url="" --json-file-output=$JSON_OUTPUT --file=lambdas/layer/requirements.txt > /dev/null 2>&1 || true
+
+    # Generate HTML report from JSON
+
+    - snyk-to-html -i $JSON_OUTPUT -o $REPORTS_PATH/dependency-scan.html || echo "[WARN] snyk-to-html failed for $MODULE_NAME"
+
+    # Produce banner (dependency mode) with unified script; fail on high severity if requested
+
+    - |
+
+      export SNYK_OUTPUT_BANNER_FILE="$REPORTS_PATH/snyk-dependency-scan-banner.txt"
+
+      export SNYK_FAIL_SEVERITY="high"
+
+      # Optional enrichment (toggle off if too verbose)
+
+      export SNYK_SHOW_SCOPE="0"; export SNYK_SHOW_TREND="0"; export SNYK_SHOW_IGNORED="0"
+
+      export SNYK_SCAN_CONTEXT="lambda:$MODULE_NAME"
+
+      export SNYK_SHOW_DEP_TABLE="1"
+
+      export SNYK_SHOW_DEP_BREAKDOWN="1"
+
+      export SNYK_PIP_REQUIREMENTS_PATH="$CI_PROJECT_DIR/lambdas/layer/py_requirements_full.txt"
+
+      python3 scripts/snyk_scan_coverage.py "$CI_PROJECT_DIR/$JSON_OUTPUT"
+
+      rc=$?
+
+      if [ $rc -ne 0 ]; then
+
+        echo "[ERROR] High severity vulnerabilities detected in lambda '$MODULE_NAME'.";
+
+        exit $rc;
+
+      fi
+
+  rules:
+
+    - if: '$SPEEDY_PIPELINE == "true"'
+
+      when: never
+
+    - when: on_success
+
+  parallel:
+
+    matrix:
+
+      - MODULE_NAME: cloudwatch_ecs_tagger
+
+  artifacts:
+
+    paths:
+
+      - reports/
+
+      - reports/snyk/*/snyk-dependency-scan-banner.txt
+
+      - reports/snyk/*/dependency-scan.html
+
+ 
+
+snyk-java-dependency-scan:
+
+  image: $CI_REGISTRY/registry/sfcommon/snyk/java:latest
+
+  stage: code-scans
+
+  extends:
+
+    - .snyk-scans-template
+
+  needs: ["install-java-packages"]
+
+  parallel: 1
+
+  variables:
+
+    JSON_OUTPUT: snyk-dependency-scan.json
+
+    REPORTS_PATH: reports/snyk/fargate
+
+  script:
+
+    - mkdir -p $REPORTS_PATH
+
+    # Run Snyk from repo root to flatten grouping in Snyk UI
+
+    - cd $CI_PROJECT_DIR
+
+    - snyk monitor --org=$SNYK_ORG --project-tags=solma_id=$SOLMA_ID,gitlab_project_id=$CI_PROJECT_ID --project-name="Personalization - Java" --target-name="Personalization" --remote-repo-url="" --project-lifecycle=production --file=fargate/pom.xml || true
+
+    - snyk test --org=$SNYK_ORG --project-name="Personalization - Java" --target-name="Personalization" --remote-repo-url="" --json-file-output=$REPORTS_PATH/$JSON_OUTPUT --file=fargate/pom.xml || true
+
+    - cd fargate/target/
+
+    - snyk test --org=$SNYK_ORG --project-name="Personalization - Java" --target-name="Personalization" --remote-repo-url="" --json-file-output=$CI_PROJECT_DIR/$REPORTS_PATH/snyk-jar-scan.json --scan-all-unmanaged || true
+
+    - cd $CI_PROJECT_DIR/$REPORTS_PATH
+
+    - snyk-to-html -i $JSON_OUTPUT -o dependency-scan.html
+
+    - |
+
+      if [ "${FAIL_ON_HIGH_VULNS:-true}" = "true" ]; then
+
+        export SNYK_SCAN_CONTEXT="fargate:java"
+
+        export SNYK_FALLBACK_MAVEN_LIST="$CI_PROJECT_DIR/fargate/target/dependency_list.txt"
+
+        export SNYK_JAR_LIBS_PATH="$CI_PROJECT_DIR/fargate/target/jar_libs/libs.txt"
+
+        export SNYK_SHOW_DEP_BREAKDOWN="1"
+
+        export SNYK_SHOW_DEP_LIST="0"
+
+        export SNYK_SHOW_DEP_TABLE="1"
+
+        python3 $CI_PROJECT_DIR/scripts/snyk_scan_coverage.py "$CI_PROJECT_DIR/$REPORTS_PATH/$JSON_OUTPUT"
+
+        rc=$?
+
+        if [ $rc -ne 0 ]; then
+
+          echo "[ERROR] High severity vulnerabilities detected. Failing job (exit code $rc).";
+
+          exit $rc
+
+        fi
+
+      fi
+
+  rules:
+
+    - if: '$SPEEDY_PIPELINE == "true"'
+
+      when: never
+
+    - when: on_success
+
+  artifacts:
+
+    paths:
+
+      - reports/snyk/fargate/
+
+ 
+
+snyk-java-static-scan:
+
+  image: $CI_REGISTRY/registry/sfcommon/snyk/java:latest
+
+  stage: code-scans
+
+  extends:
+
+    - .snyk-scans-template
+
+  needs: ["install-java-packages"]
+
+  parallel: 1
+
+  variables:
+
+    JSON_OUTPUT: snyk-static-code-scan.json
+
+    REPORTS_PATH: reports/snyk/fargate
+
+    SNYK_STATIC_FAIL_SEVERITY: "high"
+
+    SNYK_STATIC_MAX_LIST: "10"
+
+    SNYK_STATIC_BANNER_WIDTH: "110"
+
+    SNYK_STATIC_DEBUG: "1"
+
+  script:
+
+    - mkdir -p $REPORTS_PATH
+
+    # Run Snyk from repo root to flatten grouping in Snyk UI
+
+    - cd $CI_PROJECT_DIR
+
+    - snyk code test --org=$SNYK_ORG --json-file-output=reports/snyk/fargate/snyk-static-code-scan.json --project-name="Personalization - Java" --target-name="Personalization" --project-tags=solma_id=$SOLMA_ID,gitlab_project_id=$CI_PROJECT_ID --project-lifecycle=production --file=fargate/pom.xml > /dev/null 2>&1 || true
+
+    # Copy Java sources preserving full path (including leading fargate/) so snyk-to-html can resolve issue file paths
+
+    - |
+
+      echo "[INFO] Copying Java source files for static scan HTML embedding..."
+
+      for tree in fargate/src/main/java fargate/src/test/java; do
+
+        if [ -d "$tree" ]; then
+
+          find "$tree" -type f -name '*.java' | while read srcfile; do
+
+            dest="reports/snyk/fargate/$srcfile"
+
+            mkdir -p "$(dirname "$dest")"
+
+            cp "$srcfile" "$dest" || true
+
+          done
+
+        fi
+
+      done
+
+      # Also copy the unified scan script referenced in some issue stacks
+
+      mkdir -p reports/snyk/fargate/scripts
+
+      cp scripts/snyk_scan_coverage.py reports/snyk/fargate/scripts/ 2>/dev/null || true
+
+    - cd reports/snyk/fargate
+
+    - snyk-to-html -i $JSON_OUTPUT -o static-code-scan.html
+
+    - |
+
+      echo "Generating static scan banner (unified script)..."
+
+      export SNYK_SCAN_CONTEXT="fargate:static"
+
+      python3 $CI_PROJECT_DIR/scripts/snyk_scan_coverage.py --mode static "$CI_PROJECT_DIR/$REPORTS_PATH/$JSON_OUTPUT" || echo "[WARN] unified static banner failed"
+
+  rules:
+
+    - if: '$SPEEDY_PIPELINE == "true"'
+
+      when: never
+
+    - when: on_success
+
+  artifacts:
+
+    paths:
+
+      - reports/snyk/fargate/
+
+      - reports/snyk/fargate/snyk-static-code-scan-banner.txt
+
+ 
+
+# ---------------------------------------------------------
+
+# --- ECS Stages
+
+# ---------------------------------------------------------
+
+install-java-packages:
+
+  stage: install-packages
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  variables:
+
+    AWS_REGION: "us-east-1" # needed for unit tests
+
+  before_script:
+
+    - !reference [.jfrog-credentials, script]
+
+  script:
+
+    # Build JAR and capture exit; then gather dependencies from multiple sources for completeness
+
+    - |
+
+      mvn -q -f fargate/pom.xml -Dmaven.repo.local=.m2/repository \
+
+      -Dmaven-jfrog.username=$JFROG_USER -Dmaven-jfrog.password=$JFROG_TEMP_IDENTITY_TOKEN \
+
+      clean package -DskipTests
+
+      BUILD_RC=$?; echo $BUILD_RC > fargate/target/build_exit_code
+
+      # Source 1: dependency:list (runtime scope, verbose)
+
+      # NOTE: When using -f fargate/pom.xml the project baseDir is fargate/, so outputFile should be relative to that (target/...), not fargate/target/...
+
+      mvn -q -f fargate/pom.xml -Dmaven.repo.local=.m2/repository \
+
+      -Dmaven-jfrog.username=$JFROG_USER -Dmaven-jfrog.password=$JFROG_TEMP_IDENTITY_TOKEN \
+
+      dependency:list -DincludeScope=runtime -DincludeTypes=jar -Dverbose -DoutputFile=target/dependency_list.txt -DappendOutput=false || true
+
+      # Source 2: dependency:tree (verbose)
+
+      mvn -q -f fargate/pom.xml -Dmaven.repo.local=.m2/repository \
+
+      -Dmaven-jfrog.username=$JFROG_USER -Dmaven-jfrog.password=$JFROG_TEMP_IDENTITY_TOKEN \
+
+      dependency:tree -Dverbose -DoutputFile=target/dependency_tree.txt || true
+
+      # Source 3: BOOT-INF/lib contents from jar (fat jar libs)
+
+      if ls fargate/target/*.jar >/dev/null 2>&1; then APP_JAR=$(ls fargate/target/*.jar | head -n1); mkdir -p fargate/target/jar_libs; jar tf "$APP_JAR" 2>/dev/null | grep 'BOOT-INF/lib/' | sed 's#BOOT-INF/lib/##' | grep '\\.jar$' | sort -u > fargate/target/jar_libs/libs.txt || true; fi
+
+      # Source 4: dependency:copy-dependencies (runtime scope) for introspection
+
+      apk add --no-cache unzip >/dev/null 2>&1 || true
+
+      mvn -q -f fargate/pom.xml -Dmaven.repo.local=.m2/repository \
+
+      -Dmaven-jfrog.username=$JFROG_USER -Dmaven-jfrog.password=$JFROG_TEMP_IDENTITY_TOKEN \
+
+      dependency:copy-dependencies -DincludeScope=runtime -DexcludeTypes=pom -Dmdep.useRepositoryLayout=false -Dmdep.prependGroupId=true -DoutputDirectory=target/copied_deps || true
+
+      # Source 5: dependency:resolve (runtime) capture output
+
+      mvn -q -f fargate/pom.xml -Dmaven.repo.local=.m2/repository \
+
+      -Dmaven-jfrog.username=$JFROG_USER -Dmaven-jfrog.password=$JFROG_TEMP_IDENTITY_TOKEN \
+
+      dependency:resolve -DincludeScope=runtime -Dsilent=false > fargate/target/dependency_resolve.txt 2>&1 || true
+
+    # Build bright color banner aggregating all dependency sources
+
+    - |
+
+        if [ -x scripts/dependency_coverage.sh ]; then
+
+          scripts/dependency_coverage.sh java || { echo "[ERROR] dependency_coverage.sh failed"; exit 17; }
+
+        else
+
+          sh scripts/dependency_coverage.sh java || { echo "[ERROR] dependency_coverage.sh (sh fallback) failed"; exit 17; }
+
+        fi
+
+  artifacts:
+
+    expire_in: 2 days
+
+    paths:
+
+      - fargate/target/
+
+ 
+
+# list-jar-classes:
+
+#   stage: install-packages
+
+#   needs: ["install-java-packages"]
+
+#   image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+
+#   script:
+
+#     # - echo "Checking for git.properties in the JAR:"
+
+#     # - jar tf fargate/target/java-personalization.jar | grep git.properties || echo "git.properties not found"
+
+#     # - echo "Listing classes in the JAR:"
+
+#     # - jar tf fargate/target/java-personalization.jar
+
+#     - echo "All XML config files in the JAR:"
+
+#     - jar tf fargate/target/java-personalization.jar | grep -i '.xml'
+
+#     #- echo "Listing classes in the JAR:"
+
+#     #- jar tf fargate/target/java-personalization.jar
+
+ 
+
+.create-docker-image:
+
+  stage: deploy-fargate-container
+
+  needs: ["install-java-packages"]
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26
+
+  services:
+
+    - name: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26-dind
+
+      alias: docker
+
+  extends:
+
+    - .aws-runner
+
+  variables:
+
+  script:
+
+    - *set-tf-env
+
+    # (No docker build occurs in this template job; if you extend it, your script will run after TF_VAR_environment export.)
+
+  before_script:
+
+    - mv fargate/target/java-personalization.jar fargate/docker/
+
+    - echo $DEPLOY_TOKEN_USERNAME
+
+    - echo $DEPLOY_TOKEN_PASSWORD | docker login $CI_REGISTRY --username $DEPLOY_TOKEN_USERNAME --password-stdin
+
+ 
+
+create-fargate-image:
+
+  stage: deploy-fargate-container
+
+  needs: ["install-java-packages"]
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26
+
+  services:
+
+    - name: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26-dind
+
+      alias: docker
+
+  extends:
+
+    - .aws-runner
+
+  variables:
+
+    PRINT_JSON_SUMMARY: "1" # Echo JSON summary to job log
+
+    SHOW_VULN_JSON: "reports/snyk/fargate/snyk-dependency-scan.json" # Path produced by snyk-java-dependency-scan (runs later currently)
+
+  before_script:
+
+    - ls -l fargate/target/
+
+    - mv fargate/target/java-personalization.jar fargate/docker/
+
+  script:
+
+    - *set-tf-env
+
+    - echo "Determining TAG_NAME based on branch..."
+
+    - |
+
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+
+        export TAG_NAME="prod"
+
+      elif [ "$CI_COMMIT_BRANCH" = "test-main" ]; then
+
+        export TAG_NAME="test"
+
+      else
+
+        export TAG_NAME=$(echo ${CI_COMMIT_BRANCH} | cut -d'-' -f1 | cut -c1-6)
+
+        echo "Setting TAG_NAME to $TAG_NAME based on branch $CI_COMMIT_BRANCH"
+
+      fi
+
+      export IMG_REGISTRY_PATH="registry.sfgitlab.opr.statefarm.org/enterprise-interactions-platform/personalization-api"
+
+      export IMG_REGISTRY_PATH_W_TAG=$IMG_REGISTRY_PATH:$TAG_NAME
+
+      echo "TAG_NAME is $TAG_NAME"
+
+      echo "IMG_REGISTRY_PATH_W_TAG is $IMG_REGISTRY_PATH_W_TAG"
+
+      docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY > /dev/null 2>&1
+
+      export GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+      mkdir -p fargate/target
+
+      echo "Building Docker image (single build with commit arg)..."
+
+      docker build --build-arg GIT_COMMIT=$GIT_COMMIT -t $IMG_REGISTRY_PATH_W_TAG ./fargate/docker > fargate/target/docker_build.log 2>&1
+
+      echo "Pushing Docker image..."
+
+      docker push $IMG_REGISTRY_PATH_W_TAG > fargate/target/docker_push.log 2>&1
+
+      echo "Generating Fargate build summary banner..."
+
+      if [ -x scripts/fargate_build_summary.sh ]; then
+
+        scripts/fargate_build_summary.sh "$TAG_NAME" "$IMG_REGISTRY_PATH" "$GIT_COMMIT" || echo "[WARN] fargate_build_summary.sh failed"
+
+      else
+
+        sh scripts/fargate_build_summary.sh "$TAG_NAME" "$IMG_REGISTRY_PATH" "$GIT_COMMIT" || echo "[WARN] fargate_build_summary.sh (sh fallback) failed"
+
+      fi
+
+  artifacts:
+
+    when: always
+
+    paths:
+
+      - fargate/target/docker_build.log
+
+      - fargate/target/docker_push.log
+
+      - fargate/target/fargate_build_banner.txt
+
+      - fargate/target/fargate_build_summary.json
+
+      - fargate/target/last_digest.txt
+
+ 
+
+# ---------------------------------------------------------
+
+# --- Unit Tests
+
+# ---------------------------------------------------------
+
+java-unit-tests:
+
+  stage: testing
+
+  needs: ["install-java-packages"]
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  variables:
+
+    AWS_REGION: "us-east-1"
+
+  rules:
+
+    - if: '$SPEEDY_PIPELINE == "true"'
+
+      when: never
+
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+      when: never
+
+    - when: on_success
+
+  before_script:
+
+    - !reference [.jfrog-credentials, script]
+
+  script:
+
+    - apk add --no-cache libxml2
+
+    - export MAVEN_OPTS="-Dlogging.level.root=ERROR"
+
+    - bash scripts/unit_test_coverage.sh
+
+  artifacts:
+
+    when: always
+
+    reports:
+
+      junit: fargate/target/surefire-reports/TEST-*.xml
+
+    paths:
+
+      - fargate/target/surefire-reports/
+
+      - fargate/target/site/jacoco/
+
+      - fargate/target/jacoco.exec
+
+      - fargate/target/jacoco-tokens/
+
+      - fargate/target/jacoco-short/
+
+  coverage: '/^\\[INFO\\] Total.*?([0-9]{1,3})%/'
+
+ 
+
+# ---------------------------------------------------------
+
+# --- Integration Testing
+
+# ---------------------------------------------------------
+
+integration-tests:
+
+  stage: testing
+
+  needs: ["install-java-packages"]
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+
+  services:
+
+    - name: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/docker/alpine:26-dind
+
+      alias: docker
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  cache:
+
+    key: integration-testing-cache
+
+    paths:
+
+      - .m2/repository
+
+  variables:
+
+    AWS_REGION: "us-east-1"
+
+    DOCKER_HOST: tcp://docker:2375
+
+    DOCKER_TLS_CERTDIR: ""
+
+    DOCKER_DRIVER: overlay2
+
+    ENVIRONMENT: "integration"
+
+  rules:
+
+    - if: '$SPEEDY_PIPELINE == "true"'
+
+      when: never
+
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+      when: never
+
+    - when: on_success
+
+  before_script:
+
+    - !reference [.jfrog-credentials, script]
+
+  script:
+
+    - apk add --no-cache libxml2
+
+    - export MAVEN_OPTS="-Dlogging.level.root=ERROR"
+
+    # Run integration tests with coverage reporting banner
+
+    - bash scripts/integration_test_coverage.sh
+
+  artifacts:
+
+    when: always
+
+    reports:
+
+      junit: fargate/target/failsafe-reports/TEST-*.xml
+
+    paths:
+
+      - fargate/target/failsafe-reports/
+
+      - fargate/target/site/jacoco-it/
+
+      - fargate/target/jacoco-it-tokens/
+
+      - fargate/target/jacoco-it-short/
+
+ 
+
+# ---------------------------------------------------------
+
+# --- Mutation Testing
+
+# ---------------------------------------------------------
+
+mutation-tests:
+
+  stage: testing
+
+  needs: ["install-java-packages", "java-unit-tests"]
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  variables:
+
+    MIN_MUTATION_SCORE: "100"
+
+    FULL_MUTATION_RUN: "false"
+
+  rules:
+
+    - if: '$SPEEDY_PIPELINE == "true"'
+
+      when: never
+
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+      when: never
+
+    - when: on_success
+
+  before_script:
+
+    - !reference [.jfrog-credentials, script]
+
+  script:
+
+    - mkdir -p fargate/target/pit-reports
+
+    - |
+
+      if [ "${FULL_MUTATION_RUN:-false}" = "true" ]; then
+
+        echo "[PIT] FULL_MUTATION_RUN=true -> performing full mutation run (incremental disabled)."
+
+        PIT_INC_FLAG="-Dpit.enableDefaultIncrementalAnalysis=false"
+
+      else
+
+        echo "[PIT] Using incremental mutation analysis (enableDefaultIncrementalAnalysis=true). Set FULL_MUTATION_RUN=true to disable."
+
+        PIT_INC_FLAG="-Dpit.enableDefaultIncrementalAnalysis=true"
+
+      fi
+
+    - mvn -f fargate/pom.xml -Pmutation $PIT_INC_FLAG -Dmaven.repo.local=.m2/repository -Dmaven-jfrog.username=$JFROG_USER -Dmaven-jfrog.password=$JFROG_TEMP_IDENTITY_TOKEN org.pitest:pitest-maven:mutationCoverage > fargate/target/pit-reports/pitest-console.log 2>&1 || true
+
+    - echo https://ei-platform.$CI_SERVER_HOST/-/team-vertigo/$CI_PROJECT_NAME/-/jobs/$CI_JOB_ID/artifacts/fargate/target/pit-reports/index.html
+
+    - chmod +x scripts/mutation_test_coverage.sh
+
+    - bash scripts/mutation_test_coverage.sh
+
+  cache:
+
+    key: pit-history
+
+    paths:
+
+      - .m2/repository
+
+      - fargate/target/pit-history/
+
+  artifacts:
+
+    when: always
+
+    paths:
+
+      - fargate/target/pit-reports/
+
+ 
+
+# ---------------------------------------------------------
+
+# --- Post Deployment Testing
+
+# ---------------------------------------------------------
+
+# load-tests:
+
+#   stage: post-deployment-tests
+
+#   image: grafana/k6:latest
+
+#   extends:
+
+#     - .aws-runner
+
+#   needs:
+
+#     - job: create-fargate-image
+
+#     - job: apply
+
+#   when: on_success
+
+#   allow_failure: true
+
+#   cache:
+
+#     key: k6-load-testing-cache
+
+#     paths:
+
+#       - .k6/
+
+#   variables:
+
+#     AWS_REGION: "us-east-1"
+
+#     VUS: "10" # Virtual users (concurrent users)
+
+#     DURATION: "2m" # Test duration
+
+#     THRESHOLD_P95: "500" # 95th percentile response time in ms
+
+#     THRESHOLD_ERROR_RATE: "0.01" # Max 1% error rate
+
+#   before_script:
+
+#     - unset no_proxy NO_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
+
+#   script:
+
+#     - |
+
+#       # Determine environment and base URL
+
+#       if [[ "$CI_COMMIT_REF_NAME" == "main" ]]; then
+
+#         export CI_ENVIRONMENT_NAME="prod"
+
+#         echo "Skipping load tests in production environment."
+
+#         exit 0
+
+#       elif [[ "$CI_COMMIT_REF_NAME" == "test-main" ]]; then
+
+#         export CI_ENVIRONMENT_NAME="test"
+
+#         export BASE_URL="https://personalization.entint.test.ic1.statefarm"
+
+#       else
+
+#         export CI_ENVIRONMENT_NAME=$(echo ${CI_COMMIT_BRANCH} | cut -d'-' -f1 | cut -c1-6)
+
+#         export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.statefarm"
+
+#       fi
+
+#       echo "[INFO] Running load tests against: $BASE_URL"
+
+ 
+
+#       # Create k6 test script
+
+#       mkdir -p tests/load
+
+#       cat > tests/load/load-test.js << 'EOF'
+
+#       import http from 'k6/http';
+
+#       import { check, sleep } from 'k6';
+
+#       import { Rate, Trend } from 'k6/metrics';
+
+ 
+
+#       // Custom metrics
+
+#       const errorRate = new Rate('errors');
+
+#       const healthCheckDuration = new Trend('health_check_duration');
+
+ 
+
+#       export const options = {
+
+#         stages: [
+
+#           { duration: '30s', target: __ENV.VUS * 0.5 }, // Ramp up to 50%
+
+#           { duration: '1m', target: __ENV.VUS }, // Stay at peak
+
+#           { duration: '30s', target: 0 }, // Ramp down
+
+#         ],
+
+#         thresholds: {
+
+#           'http_req_duration': [`p(95)<${__ENV.THRESHOLD_P95}`],
+
+#           'errors': [`rate<${__ENV.THRESHOLD_ERROR_RATE}`],
+
+#           'http_req_failed': [`rate<${__ENV.THRESHOLD_ERROR_RATE}`],
+
+#         },
+
+#       };
+
+ 
+
+#       export default function () {
+
+#         const baseUrl = __ENV.BASE_URL;
+
+ 
+
+#         // Health check endpoint
+
+#         let healthRes = http.get(`${baseUrl}/actuator/health`, {
+
+#           tags: { name: 'HealthCheck' },
+
+#         });
+
+ 
+
+#         check(healthRes, {
+
+#           'health check status is 200': (r) => r.status === 200,
+
+#           'health check returns UP': (r) => r.json('status') === 'UP',
+
+#         }) || errorRate.add(1);
+
+ 
+
+#         healthCheckDuration.add(healthRes.timings.duration);
+
+ 
+
+#         // Info endpoint
+
+#         let infoRes = http.get(`${baseUrl}/actuator/info`, {
+
+#           tags: { name: 'InfoEndpoint' },
+
+#         });
+
+ 
+
+#         check(infoRes, {
+
+#           'info endpoint status is 200': (r) => r.status === 200,
+
+#         }) || errorRate.add(1);
+
+ 
+
+#         // Add your application-specific endpoints here
+
+#         // Example:
+
+#         // let apiRes = http.get(`${baseUrl}/api/personalization`, {
+
+#         //   tags: { name: 'PersonalizationAPI' },
+
+#         // });
+
+#         //
+
+#         // check(apiRes, {
+
+#         //   'api status is 200': (r) => r.status === 200,
+
+#         // }) || errorRate.add(1);
+
+ 
+
+#         sleep(1);
+
+#       }
+
+#       EOF
+
+ 
+
+#       # Run k6 load test
+
+#       echo "[INFO] Starting load test with $VUS virtual users for $DURATION..."
+
+#       k6 run \
+
+#         --out json=tests/load/load-test-results.json \
+
+#         --summary-export=tests/load/load-test-summary.json \
+
+#         tests/load/load-test.js
+
+ 
+
+#       # Check if test passed
+
+#       if [ $? -ne 0 ]; then
+
+#         echo "[ERROR] Load test failed to meet performance thresholds"
+
+#         exit 1
+
+#       fi
+
+ 
+
+#       echo "[INFO] Load testing completed successfully"
+
+#   artifacts:
+
+#     when: always
+
+#     paths:
+
+#       - tests/load/
+
+#     reports:
+
+#       junit: tests/load/load-test-summary.json
+
+#   rules:
+
+#     - if: '$SPEEDY_PIPELINE == "true"'
+
+#       when: never
+
+#     - if: '$CI_COMMIT_BRANCH == "main"'
+
+#       when: never
+
+#     - when: on_success
+
+ 
+
+chaos-tests:
+
+  stage: post-deployment-tests
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  needs:
+
+    - job: create-fargate-image
+
+    - job: apply
+
+  when: on_success
+
+  allow_failure: true
+
+  cache:
+
+    key: chaos-testing-cache
+
+    paths:
+
+      - .m2/repository
+
+  variables:
+
+    AWS_REGION: "us-east-1"
+
+    AWS_ACCESS_KEY_ID: $DEV_PIPELINE_AWS_KEY_ID
+
+    AWS_SECRET_ACCESS_KEY: $DEV_PIPELINE_AWS_KEY_SECRET
+
+    ASSAULT_TYPE: "latency" # Options: latency, memory, exception, killapp
+
+    LATENCY_MIN: "1000"
+
+    LATENCY_MAX: "3000"
+
+    ASSAULT_DURATION: "60" # seconds
+
+  before_script:
+
+    - unset no_proxy NO_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
+
+    - !reference [.jfrog-credentials, script]
+
+  script:
+
+    - |
+
+      # Determine environment and base URL
+
+      if [[ "$CI_COMMIT_REF_NAME" == "main" ]]; then
+
+        export CI_ENVIRONMENT_NAME="prod"
+
+        echo "Skipping chaos tests in production environment."
+
+        exit 0
+
+      elif [[ "$CI_COMMIT_REF_NAME" == "test-main" ]]; then
+
+        export CI_ENVIRONMENT_NAME="test"
+
+        export BASE_URL="https://personalization.entint.test.ic1.statefarm"
+
+      else
+
+        export CI_ENVIRONMENT_NAME=$(echo ${CI_COMMIT_BRANCH} | cut -d'-' -f1 | cut -c1-6)
+
+        export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.statefarm"
+
+      fi
+
+     
+
+      # Run chaos test coverage script (unified banner + metrics)
+
+      bash scripts/chaos_test_coverage.sh
+
+  artifacts:
+
+    when: always
+
+    paths:
+
+      - tests/chaos/
+
+    expose_as: 'Chaos Test Results'
+
+  rules:
+
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+      when: never
+
+    - when: on_success
+
+ 
+
+# ---------------------------------------------------------
+
+# --- Acceptance Tests
+
+# ---------------------------------------------------------
+
+acceptance-tests:
+
+  stage: post-deployment-tests
+
+  image: registry.sfgitlab.opr.statefarm.org/registry/sfcommunity/maven/jfrog:3.9.6-openjdk-17
+
+  extends:
+
+    - .aws-runner
+
+    - .jfrog-credentials
+
+  # Minimal dependencies - only what's absolutely required for deployment
+
+  needs:
+
+    - job: create-fargate-image
+
+    - job: apply
+
+  when: on_success
+
+  allow_failure: false
+
+  variables:
+
+    AWS_REGION: "us-east-1"
+
+    AWS_ACCESS_KEY_ID: $DEV_PIPELINE_AWS_KEY_ID
+
+    AWS_SECRET_ACCESS_KEY: $DEV_PIPELINE_AWS_KEY_SECRET
+
+  before_script:
+
+    - unset no_proxy NO_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
+
+    - !reference [.jfrog-credentials, script]
+
+  script:
+
+    - |
+
+      # Dynamically set CI_ENVIRONMENT_NAME based on branch name logic
+
+      if [[ "$CI_COMMIT_REF_NAME" == "main" ]]; then
+
+        export CI_ENVIRONMENT_NAME="prod"
+
+      elif [[ "$CI_COMMIT_REF_NAME" == "test-main" ]]; then
+
+        export CI_ENVIRONMENT_NAME="test"
+
+      else
+
+        export CI_ENVIRONMENT_NAME=$(echo ${CI_COMMIT_BRANCH} | cut -d'-' -f1 | cut -c1-6)
+
+        echo "Setting CI_ENVIRONMENT_NAME to $CI_ENVIRONMENT_NAME based on branch $CI_COMMIT_BRANCH"
+
+      fi
+
+      echo "[DEBUG] CI_ENVIRONMENT_NAME: '$CI_ENVIRONMENT_NAME'"
+
+      echo "[DEBUG] CI_COMMIT_REF_NAME: '$CI_COMMIT_REF_NAME'"
+
+      if [[ -z "$CI_ENVIRONMENT_NAME" ]]; then
+
+        echo "[ERROR] CI_ENVIRONMENT_NAME is not set. Failing early."
+
+        exit 11
+
+      fi
+
+      if [[ "$CI_ENVIRONMENT_NAME" == "prod" ]]; then
+
+        echo "Skipping acceptance tests in main environment."
+
+        exit 12
+
+      fi
+
+      if [[ "$CI_ENVIRONMENT_NAME" == "test" ]]; then
+
+        export BASE_URL="https://personalization.entint.test.ic1.statefarm"
+
+      else
+
+        export BASE_URL="https://${CI_ENVIRONMENT_NAME}.personalization.test.ic1.statefarm"
+
+      fi
+
+      echo "[DEBUG] BASE_URL: $BASE_URL"
+
+      if [[ -z "$BASE_URL" || "$BASE_URL" == "https://.personalization.test.ic1.statefarm" ]]; then
+
+        echo "[ERROR] BASE_URL is not set correctly. Failing early."
+
+        exit 13
+
+      fi
+
+      # Ensure jq is installed for JSON parsing of /health endpoint (image may not include it by default)
+
+      if ! command -v jq >/dev/null 2>&1; then
+
+        echo "[INFO] Installing jq (apk)..."
+
+        if command -v apk >/dev/null 2>&1; then
+
+          apk add --no-cache jq || { echo "[ERROR] Failed to install jq"; exit 15; }
+
+        else
+
+          echo "[ERROR] apk not available to install jq"; exit 16
+
+        fi
+
+      fi
+
+      # Wait for the correct commit to be live before running acceptance tests
+
+      EXPECTED_COMMIT_SHORT="${CI_COMMIT_SHA:0:7}"
+
+      echo "Pipeline expects short commit: $EXPECTED_COMMIT_SHORT"
+
+      for i in {1..30}; do
+
+        echo "Checking for the $i time..."
+
+        HEALTH_RAW=$(curl -s -m 5 "$BASE_URL/health" || true)
+
+        if [[ -z "$HEALTH_RAW" ]]; then
+
+          echo "[WARN] Empty /health response (attempt $i)."
+
+        fi
+
+        # Extract gitCommitId without jq (sed regex finds 7-40 hex chars)
+
+        ACTUAL_COMMIT_FULL=$(echo "$HEALTH_RAW" | sed -n 's/.*"gitCommitId"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{7,40\}\)".*/\1/p' | head -n1)
+
+        ACTUAL_COMMIT=${ACTUAL_COMMIT_FULL:0:7}
+
+        if [[ -n "$ACTUAL_COMMIT" && "$ACTUAL_COMMIT" == "$EXPECTED_COMMIT_SHORT" ]]; then
+
+          echo "Correct commit is live: $ACTUAL_COMMIT (attempt $i)"
+
+          break
+
+        fi
+
+        echo "Waiting for correct commit... ($i/30) Current: '${ACTUAL_COMMIT:-none}'"
+
+        sleep 10
+
+      done
+
+      if [[ -z "$ACTUAL_COMMIT" || "$ACTUAL_COMMIT" != "$EXPECTED_COMMIT_SHORT" ]]; then
+
+        echo "Timed out waiting for correct commit to be live! Last raw /health payload: ${HEALTH_RAW:-<empty>}"
+
+        exit 14
+
+      fi
+
+      # Determine if we should skip Jacoco coverage check for acceptance stage.
+
+      # We never want coverage gating to fail the acceptance stage, especially when SPEEDY_PIPELINE=true.
+
+      if [[ "$SPEEDY_PIPELINE" == "true" ]]; then
+
+        export MVN_JACOCO_SKIP="-Djacoco.skip=true"
+
+        echo "[INFO] SPEEDY_PIPELINE=true -> Skipping Jacoco coverage check in acceptance tests."
+
+      else
+
+        export MVN_JACOCO_SKIP="-Djacoco.skip=true" # Acceptance tests are observational; always skip coverage gating.
+
+        echo "[INFO] Always skipping Jacoco coverage check for acceptance tests to avoid gating on observational tests."
+
+      fi
+
+      # Run only acceptance tests (adjust -Pacceptance if you use a Maven profile, or use -Dtest=... for class pattern)
+
+      mvn -f fargate/pom.xml -Dmaven.repo.local=.m2/repository -Dmaven-jfrog.username=$JFROG_USER -Dmaven-jfrog.password=$JFROG_TEMP_IDENTITY_TOKEN -Pacceptance test -DbaseUrl=$BASE_URL $MVN_JACOCO_SKIP
+
+  artifacts:
+
+    when: always
+
+    reports:
+
+      junit: fargate/target/surefire-reports/TEST-*.xml
+
+    paths:
+
+      - fargate/target/surefire-reports/
